@@ -13,7 +13,7 @@ from split_engine import to_cents
 
 log = logging.getLogger("splitsnap.parser")
 
-DEFAULT_MODEL = "gemini-2.5-flash"  # override with GEMINI_MODEL in .env; check Google's current model list
+DEFAULT_MODEL = "gemini-1.5-flash"  # standard production vision model
 
 VISION_SYSTEM_PROMPT = """
 You are a precision OCR and receipt data extraction engine.
