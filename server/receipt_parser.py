@@ -13,7 +13,7 @@ from split_engine import to_cents
 
 log = logging.getLogger("splitsnap.parser")
 
-DEFAULT_MODEL = "gemini-1.5-flash"  # standard production vision model
+DEFAULT_MODEL = "gemini-3.8-flash"  # override with GEMINI_MODEL; models get retired, check Google's deprecations page
 
 VISION_SYSTEM_PROMPT = """
 You are a precision OCR and receipt data extraction engine.
@@ -49,6 +49,62 @@ class ReceiptParseError(Exception):
     def __init__(self, message: str, status_code: int = 422):
         super().__init__(message)
         self.status_code = status_code
+
+
+def _sanitize(text: str) -> str:
+    """Make an exception message safe to show: strip secrets, collapse whitespace, cap length."""
+    text = re.sub(r"AIza[0-9A-Za-z_\-]{20,}", "[redacted-key]", text or "")
+    key = os.getenv("GEMINI_API_KEY")
+    if key:
+        text = text.replace(key, "[redacted-key]")
+    return " ".join(text.split())[:300]
+
+
+def _status_of(e: Exception):
+    status = getattr(e, "code", None) or getattr(e, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def explain_vision_error(e: Exception, model: str) -> str:
+    """Turn a Gemini failure into an actionable message (never includes the API key)."""
+    status = _status_of(e)
+    raw = str(e)
+    low = raw.lower()
+    if isinstance(e, ImportError):
+        hint = "The server is missing the google-genai package."
+    elif "api key" in low or "api_key_invalid" in low or status == 401:
+        hint = "The Gemini API key was rejected. Create a new key at aistudio.google.com/apikey and set GEMINI_API_KEY on the server (no quotes or spaces)."
+    elif status == 403 or "permission" in low:
+        hint = "The key is not allowed to use the Gemini API (permission denied). Create a new key in Google AI Studio."
+    elif status == 404 or "not found" in low:
+        hint = f"The model '{model}' was not found or has been retired. Set GEMINI_MODEL on the server to a current model."
+    elif status == 429 or "quota" in low or "resource_exhausted" in low:
+        hint = "Gemini quota exceeded. Wait a while, or enable billing for the key."
+    elif status is not None and status >= 500:
+        hint = "Google's service is busy or down. Try again shortly."
+    else:
+        hint = "Unexpected error while calling Gemini."
+    return f"{hint} [{type(e).__name__}{' ' + str(status) if status else ''}: {_sanitize(raw)}]"
+
+
+def check_vision() -> dict:
+    """Tiny text-only call used by /api/vision-check to diagnose key / model problems."""
+    model = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
+    try:
+        from google import genai  # noqa: F401 (also used in the error branch below)
+
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        reply = client.models.generate_content(model=model, contents="Reply with the single word: ok")
+        return {"ok": True, "model": model, "reply": (reply.text or "")[:40]}
+    except Exception as e:  # noqa: BLE001 - diagnostic endpoint reports everything
+        log.exception("Vision check failed")
+        result = {"ok": False, "model": model, "error": explain_vision_error(e, model)}
+        try:  # help pick a working model: list flash models this key can use
+            names = [m.name.replace("models/", "") for m in genai.Client(api_key=os.getenv("GEMINI_API_KEY")).models.list()]
+            result["available_flash_models"] = [n for n in names if "flash" in n][:15]
+        except Exception:  # noqa: BLE001
+            pass
+        return result
 
 
 def _prepare_image(image_bytes: bytes) -> bytes:
@@ -105,13 +161,14 @@ def parse_receipt_image(image_bytes: bytes) -> Tuple[ParsedReceipt, List[str]]:
         )
     jpeg = _prepare_image(image_bytes)
 
+    model = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
     try:
         from google import genai
         from google.genai import types
 
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model=os.getenv("GEMINI_MODEL", DEFAULT_MODEL),
+            model=model,
             contents=[
                 types.Part.from_bytes(data=jpeg, mime_type="image/jpeg"),
                 "Extract the receipt data as JSON.",
@@ -119,13 +176,13 @@ def parse_receipt_image(image_bytes: bytes) -> Tuple[ParsedReceipt, List[str]]:
             config=types.GenerateContentConfig(
                 system_instruction=VISION_SYSTEM_PROMPT,
                 response_mime_type="application/json",
-                temperature=0,
             ),
         )
         raw_text = response.text
-    except Exception:
+    except Exception as e:  # noqa: BLE001
         log.exception("Vision API call failed")
-        raise ReceiptParseError("The vision service failed. Try again or use a demo preset.", 502)
+        status = _status_of(e)
+        raise ReceiptParseError(explain_vision_error(e, model), 429 if status == 429 else 502)
 
     try:
         receipt = ParsedReceipt.model_validate(_extract_json(raw_text))
