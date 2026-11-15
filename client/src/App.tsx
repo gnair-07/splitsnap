@@ -5,9 +5,10 @@ import MemberManager from "./components/MemberManager";
 import ItemAssignmentGrid from "./components/ItemAssignmentGrid";
 import ReconciliationPanel from "./components/ReconciliationPanel";
 import SettlementModal from "./components/SettlementModal";
-import type { ParsedReceipt, Participant, ScanResponse, SplitCalculationResponse } from "./types/receipt";
+import SignInPage from "./components/SignInPage";
+import type { AppConfig, ParsedReceipt, Participant, ScanResponse, SplitCalculationResponse, User } from "./types/receipt";
 import { computeSplit } from "./utils/mathEngine";
-import { scanImage, scanPreset, verifySplit } from "./utils/api";
+import { ApiError, getConfig, getMe, logout, scanImage, scanPreset, verifySplit } from "./utils/api";
 import { AVATAR_COLORS } from "./utils/format";
 
 const DEFAULT_MEMBERS: Participant[] = [
@@ -16,7 +17,29 @@ const DEFAULT_MEMBERS: Participant[] = [
   { id: "p3", name: "David", avatar_color: AVATAR_COLORS[2] },
 ];
 
+const GUEST_KEY = "splitsnap_guest";
+const readGuest = (): boolean => {
+  try {
+    return localStorage.getItem(GUEST_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+const writeGuest = (on: boolean) => {
+  try {
+    if (on) localStorage.setItem(GUEST_KEY, "1");
+    else localStorage.removeItem(GUEST_KEY);
+  } catch {
+    /* storage unavailable: guest choice just won't persist */
+  }
+};
+
 export default function App() {
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [guest, setGuest] = useState<boolean>(readGuest());
+
   const [receipt, setReceipt] = useState<ParsedReceipt | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "error">("idle");
@@ -28,6 +51,24 @@ export default function App() {
   const [verified, setVerified] = useState<SplitCalculationResponse | null>(null);
   const [settleOpen, setSettleOpen] = useState(false);
   const nextId = useRef(4);
+
+  // Boot: ask the server whether sign-in is enabled and who (if anyone) is signed in.
+  const boot = useCallback(async () => {
+    setBootError(null);
+    try {
+      const cfg = await getConfig();
+      setConfig(cfg);
+      if (cfg.auth_enabled) setUser(await getMe());
+    } catch {
+      setBootError("Could not reach the server. If it was idle, wait about a minute and try again.");
+    }
+  }, []);
+  useEffect(() => {
+    boot();
+  }, [boot]);
+
+  const authEnabled = config?.auth_enabled ?? false;
+  const canScan = !authEnabled || user !== null;
 
   const local = useMemo(
     () => (receipt ? computeSplit(receipt, participants, assignments, customShares, organizerId) : null),
@@ -71,12 +112,39 @@ export default function App() {
       try {
         loadScan(await job());
       } catch (e) {
+        if (e instanceof ApiError && e.status === 401) {
+          // session expired or never signed in: send the user to the sign-in page
+          setUser(null);
+          setGuest(false);
+          writeGuest(false);
+          setScanStatus("idle");
+          return;
+        }
         setScanStatus("error");
         setScanError(e instanceof Error ? e.message : "Something went wrong.");
       }
     },
     [loadScan],
   );
+
+  const goToSignIn = () => {
+    writeGuest(false);
+    setGuest(false);
+  };
+  const continueAsGuest = () => {
+    writeGuest(true);
+    setGuest(true);
+  };
+  const handleSignedIn = useCallback((u: User) => {
+    setUser(u);
+    setGuest(false);
+    writeGuest(false);
+  }, []);
+  const signOut = async () => {
+    await logout();
+    setUser(null);
+    reset();
+  };
 
   const addParticipant = (name: string) => {
     const n = nextId.current++;
@@ -128,14 +196,37 @@ export default function App() {
 
   const result = verified ?? local;
 
+  if (!config) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4 text-center text-slate-700">
+        {bootError ? (
+          <div>
+            <p className="mb-3">{bootError}</p>
+            <button onClick={boot} className="rounded-lg bg-indigo-600 px-4 py-2 text-white">
+              Try again
+            </button>
+          </div>
+        ) : (
+          <p>Loading…</p>
+        )}
+      </div>
+    );
+  }
+
+  if (authEnabled && !user && !guest) {
+    return <SignInPage clientId={config.google_client_id} onSignedIn={handleSignedIn} onGuest={continueAsGuest} />;
+  }
+
   return (
     <div className="min-h-screen bg-slate-50">
-      <Navbar onReset={reset} hasReceipt={receipt !== null} />
+      <Navbar onReset={reset} hasReceipt={receipt !== null} user={user} authEnabled={authEnabled} onSignIn={goToSignIn} onSignOut={signOut} />
       <main className="mx-auto max-w-6xl space-y-4 p-4">
         <div className="grid gap-4 md:grid-cols-2">
           <ReceiptUploader
             status={scanStatus}
             error={scanError}
+            canScan={canScan}
+            onNeedSignIn={goToSignIn}
             onPreset={(name) => run(() => scanPreset(name))}
             onFile={(file) => run(() => scanImage(file))}
             onDismissError={() => {
@@ -155,7 +246,7 @@ export default function App() {
 
         {warnings.length > 0 && (
           <div className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
-            <b>Please double-check the scan:</b>
+            <b>Please double-check the scan against your receipt:</b>
             <ul className="ml-5 list-disc">
               {warnings.map((w) => (
                 <li key={w}>{w}</li>

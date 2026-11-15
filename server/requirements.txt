@@ -3,5 +3,8 @@ flask-cors==5.0.0
 pydantic==2.9.2
 python-dotenv==1.0.1
 google-genai>=1.0.0,<2
+google-auth>=2.30
+requests>=2.32
 pillow==11.0.0
+pillow-heif>=0.18
 gunicorn==23.0.0

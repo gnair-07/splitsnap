@@ -1,6 +1,6 @@
 # 🧾 SplitSnap
 
-Snap a receipt, assign items to friends, and split the bill fairly: tax, service charge, tip and discounts are shared in proportion to what each person ordered, exact to the cent. Settle with a UPI/PayPal QR code or a WhatsApp message.
+Scan a receipt with your camera (or upload a photo), assign items to friends, and split the bill fairly: tax, service charge, tip and discounts are shared in proportion to what each person ordered, exact to the cent. Settle with a UPI/PayPal QR code or a WhatsApp message.
 
 - **Frontend:** React 18 + TypeScript + Vite + Tailwind (`client/`)
 - **Backend:** Flask + Pydantic, Gemini vision for receipt scanning (`server/`)
@@ -102,3 +102,39 @@ Dockerfile  .dockerignore  .gitignore
 ## 6. How the split works
 
 All money is integer cents. Each item is split among its sharers (equally or by weight) with the largest-remainder method. Tax, service charge + tip, discount, and any receipt round-off are then shared in proportion to each person's item total. Anything unassigned is reported separately and never charged to anyone. When everything is assigned, the amounts add up to the receipt total exactly. The server and the browser use the same algorithm, and the browser's numbers are verified against the server's.
+
+
+## 7. Sign in with Google (optional)
+
+Sign-in gates **receipt scanning** (which costs money) to signed-in users and gives each user their own scan limit. Demo receipts stay open to guests. If you leave `GOOGLE_CLIENT_ID` empty, there is no sign-in page and the whole app is open. There is no database, so the app doesn't store accounts or past splits (Render's free tier loses local files on restart); your Google identity is only kept in a signed cookie.
+
+1. Open https://console.cloud.google.com and create (or pick) a project.
+2. Go to **APIs & Services, then OAuth consent screen** (Google may call it "Google Auth Platform"). Choose **External**, fill in the app name and your email, and save. Under Audience, set the publishing status to **In production** (the basic email/profile sign-in needs no review). If you leave it on "Testing", only emails you add as test users can sign in.
+3. Go to **Credentials, then Create credentials, then OAuth client ID**, application type **Web application**.
+4. Under **Authorized JavaScript origins** add both:
+   - `https://splitsnap-uto1.onrender.com` (use your own Render URL)
+   - `http://localhost:5173`
+   You don't need redirect URIs.
+5. Copy the **Client ID** (it ends in `.apps.googleusercontent.com`).
+6. Set these on the server (`server/.env` locally, **Environment** on Render):
+
+| Variable | Value |
+|---|---|
+| `GOOGLE_CLIENT_ID` | the Client ID from step 5 |
+| `SECRET_KEY` | a long random string: `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `ALLOWED_EMAILS` | optional, comma-separated emails; empty means any Google account |
+
+Restart the backend. The app now opens on a sign-in page with a **Continue as guest** option.
+
+## 8. Camera scanning and photo quality
+
+- **Scan with camera** opens a live camera view (rear camera by default, with flip and flashlight where the device supports it). Press the shutter, check the preview, then **Use this photo**. The photo is sent to Gemini, which reads the text. This is a capture-then-read flow, not per-frame live OCR.
+- The browser only allows camera access on **https** pages or `localhost`. Render is https, so it works there. On your local network (`http://192.168...`) it won't; the app then offers **Use phone camera app** instead.
+- If permission was blocked: tap the lock icon next to the address bar, set Camera to Allow, then press **Try again**.
+- For best results: lay the receipt flat, fill the frame, avoid glare and shadows, and keep text sharp. Long receipts can be photographed in one tall shot.
+- Uploaded images are rotated correctly (EXIF), kept at up to 2560 px (long receipts stay readable), and HEIC iPhone photos are supported. If the numbers don't add up, the server gives the model one second look with the discrepancy spelled out and keeps the better read; any remaining mismatch is shown as an amber warning.
+
+## 9. Diagnosing scan problems
+
+- `python check_gemini.py` (in `server/`) lists the models your key can use and tests one. Set the model it recommends as `GEMINI_MODEL`.
+- `/api/vision-check` on your deployed URL shows the same information from the server.

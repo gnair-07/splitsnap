@@ -63,3 +63,16 @@ export interface SplitCalculationRequest {
   custom_shares: Record<string, Record<string, number>>;
   organizer_id: string | null;
 }
+
+export interface User {
+  sub: string;
+  email: string;
+  name: string;
+  picture: string;
+}
+
+export interface AppConfig {
+  auth_enabled: boolean;
+  google_client_id: string;
+  vision_enabled: boolean;
+}
